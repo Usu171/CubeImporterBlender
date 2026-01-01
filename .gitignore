@@ -1,0 +1,7 @@
+*.gbw
+*.input
+test*
+*.vdb
+*.cub
+*.cube
+test/
