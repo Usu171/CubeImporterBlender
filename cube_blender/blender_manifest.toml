@@ -1,0 +1,21 @@
+schema_version = "1.0.0"
+id = "cube_blender"
+version = "0.1.0"
+name = "Cube Blender"
+tagline = "Import Gaussian Cube files as OpenVDB Volumes"
+maintainer = "Usu171"
+type = "add-on"
+blender_version_min = "4.5.0"
+license = ["SPDX:GPL-3.0-or-later"]
+tags = ["Import-Export"]
+
+
+[permissions]
+files = "Import Gaussian Cube files from disk"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "/*.zip",
+]

@@ -13,20 +13,12 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-bl_info = {
-    "name": "Import Gaussian Cube",
-    "author": "Usu171",
-    "version": (0, 1, 0),
-    "blender": (3, 0, 0),
-    "location": "File > Import > Gaussian Cube (.cub)",
-    "description": "Import Gaussian Cube files as OpenVDB Volumes",
-    "category": "Import-Export",
-}
-
 import bpy
 import numpy as np
 import os
 import time
+import re
+import glob
 
 try:
     import openvdb
@@ -59,18 +51,24 @@ class ImportGaussianCube(bpy.types.Operator):
         default='MO_INDICES',
     )
     
+    import_sequence: bpy.props.BoolProperty(
+        name="Import Sequence",
+        description="Try to import all files matching the numbered pattern (e.g. file001.cub -> file{n}.cub)",
+        default=False,
+    )
+    
     def execute(self, context):
         if openvdb is None:
             self.report({'ERROR'}, "openvdb module not found. This addon requires a Blender build with OpenVDB support.")
             return {'CANCELLED'}
         
         if self.files:
-            # Multiple files selected
+            # Multiple files selected (Standard loop)
             success = False
             for file in self.files:
                 filepath = os.path.join(self.directory, file.name)
                 try:
-                    load_cube(filepath, context, self.scale_factor, self.naming_mode)
+                    load_cube(filepath, context, self.scale_factor, self.naming_mode, self.import_sequence)
                     success = True
                 except Exception as e:
                     self.report({'ERROR'}, f"Failed to import {file.name}: {str(e)}")
@@ -79,9 +77,9 @@ class ImportGaussianCube(bpy.types.Operator):
             
             return {'FINISHED'} if success else {'CANCELLED'}
         else:
-            # Single file fallback
+            # Single file selected (but might be sequence starter)
             try:
-                load_cube(self.filepath, context, self.scale_factor, self.naming_mode)
+                load_cube(self.filepath, context, self.scale_factor, self.naming_mode, self.import_sequence)
                 return {'FINISHED'}
             except Exception as e:
                 self.report({'ERROR'}, f"Failed to import Cube: {str(e)}")
@@ -93,10 +91,8 @@ class ImportGaussianCube(bpy.types.Operator):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
-def load_cube(filepath, context, scale=1.0, naming_mode='MO_INDICES'):
-    start_time = time.time()
-    print(f"Loading Cube file: {filepath}")
-    
+def read_vdb_grids(filepath, scale=1.0, naming_mode='MO_INDICES', force_grid_name=None):
+    print(f"Reading Cube data: {filepath}")
     with open(filepath, 'r') as f:
         # 1. Tittle
         header1 = f.readline().strip()
@@ -104,6 +100,7 @@ def load_cube(filepath, context, scale=1.0, naming_mode='MO_INDICES'):
         
         # 2. Atoms count + Origin
         line = f.readline().split()
+        if not line: raise ValueError("Empty file or bad format")
         n_atoms = int(line[0])
         origin = np.array([float(x) for x in line[1:4]])
         
@@ -113,7 +110,6 @@ def load_cube(filepath, context, scale=1.0, naming_mode='MO_INDICES'):
             n_atoms = abs(n_atoms)
             
         # 3. Vectors
-        # N1, X1, Y1, Z1
         line = f.readline().split()
         n1 = int(line[0])
         v1 = np.array([float(x) for x in line[1:4]])
@@ -126,8 +122,6 @@ def load_cube(filepath, context, scale=1.0, naming_mode='MO_INDICES'):
         n3 = int(line[0])
         v3 = np.array([float(x) for x in line[1:4]])
         
-        print(f"Grid Size: {n1} x {n2} x {n3}")
-        
         # 4. Atoms (Skip)
         for _ in range(n_atoms):
             f.readline()
@@ -137,46 +131,33 @@ def load_cube(filepath, context, scale=1.0, naming_mode='MO_INDICES'):
         mo_indices = []
         if is_multi_mo:
             line = f.readline().split()
-            # First int is n_mo
             try:
                 n_mo = int(line[0])
             except ValueError:
-                # Fallback if line is empty or weird?
                 n_mo = 1
                 
             current_indices = [int(x) for x in line[1:]] if len(line) > 1 else []
-
             if n_mo > 1:
                 while len(current_indices) < n_mo:
                     line = f.readline().split()
                     current_indices.extend([int(x) for x in line])
                 mo_indices = current_indices[:n_mo]
-                print(f"Multiple Orbitals Found: {n_mo} ({mo_indices})")
             elif n_mo == 1 and current_indices:
                 mo_indices = current_indices[:1]
-                print(f"Single Orbital Found: {mo_indices}")
-            else:
-                 print("Single Orbital in Multi mode")
 
         # 6. Grid Data
-        print("Reading data...")
-        # Efficient read
         content = f.read()
         
     data = np.fromstring(content, sep=' ')
-    
     expected_len = n1 * n2 * n3 * n_mo
+    
     if data.size != expected_len:
         print(f"Warning: Expected {expected_len} values, got {data.size}. Adjusting.")
         if data.size > expected_len:
             data = data[:expected_len]
         else:
-            # Padding?
              data = np.pad(data, (0, expected_len - data.size))
     
-    # Reshape
-    # Cube: i(X), j(Y), k(Z). Z fast.
-    # At each point: MO1, MO2...
     if n_mo > 1:
         data = data.reshape((n1, n2, n3, n_mo))
     else:
@@ -184,51 +165,129 @@ def load_cube(filepath, context, scale=1.0, naming_mode='MO_INDICES'):
         
     grids = []
     
-    # Transform Matrix construction
+    # Transform
     mat = np.identity(4)
     mat[0, :3] = v1 * scale
     mat[1, :3] = v2 * scale
     mat[2, :3] = v3 * scale
     mat[3, :3] = origin * scale
-    print(mat)
     
-    # openvdb expects transform
     transform = openvdb.createLinearTransform(mat)
     
-    print("Converting to VDB Grids...")
     for m in range(n_mo):
         if n_mo > 1:
             vol_data = data[:, :, :, m]
         else:
             vol_data = data
 
-        if is_multi_mo:
-            if naming_mode == 'MO_INDICES' and mo_indices:
-                grid_name = f"MO_{mo_indices[m]}"
-            else:
-                grid_name = f"MO_{m+1}"
+        if force_grid_name is not None:
+             if n_mo > 1:
+                 grid_name = f"{force_grid_name}_{m+1}"
+             else:
+                 grid_name = force_grid_name
         else:
-            grid_name = "Density"
+            if is_multi_mo:
+                if naming_mode == 'MO_INDICES' and mo_indices:
+                    grid_name = f"{mo_indices[m]}"
+                else:
+                    grid_name = f"{m+1}"
+            else:
+                grid_name = "Density"
 
         grid = openvdb.FloatGrid()
         grid.name = grid_name
         grid.copyFromArray(vol_data.astype(np.float32)) 
         grid.transform = transform
         grid.gridClass = openvdb.GridClass.FOG_VOLUME
-        
         grids.append(grid)
         
-    # Write .vdb
-    output_vdb = os.path.splitext(filepath)[0] + ".vdb"
-    print(f"Writing VDB to {output_vdb}")
-    openvdb.write(output_vdb, grids=grids)
+    return grids
+
+def load_cube(filepath, context, scale=1.0, naming_mode='MO_INDICES', import_sequence=False):
+    start_time = time.time()
     
-    # Import to Blender
-    if os.path.exists(output_vdb):
-        bpy.ops.object.volume_import(filepath=output_vdb, align='WORLD', location=(0,0,0))
-        print("Import done.")
+    to_process = [] # list of (path, name_override)
+    
+    base_dir = os.path.dirname(filepath)
+    filename = os.path.basename(filepath)
+    
+    output_vdb_name = os.path.splitext(filepath)[0] + ".vdb"
+    
+    if import_sequence:
+        # Detect pattern: last sequence of digits
+        # file001.cub -> pattern match "001"
+        match = re.search(r'(\d+)(?=(\.[^.]+)$)', filename) 
+        # (?=(\.[^.]+)$) looks for digits followed by extension
+        
+        if match:
+            digits = match.group(1)
+            
+            # Construct glob pattern or regex
+            prefix = filename[:match.start(1)]
+            suffix = filename[match.end(1):]
+            
+            # Regex for matching other files
+            pattern_str = f"^{re.escape(prefix)}(\\d+){re.escape(suffix)}$"
+            pattern = re.compile(pattern_str)
+            
+            print(f"Sequence Pattern: {pattern_str}")
+            
+            # Override output filename for sequence: file001.cub -> file_all.vdb
+            name_base = prefix
+            if not name_base.endswith('_') and not name_base.endswith('.'):
+                name_base += "_"
+            output_vdb_name = os.path.join(base_dir, name_base + "all.vdb")
+            
+            # Scan directory
+            all_files = os.listdir(base_dir)
+            
+            found_sequences = []
+            for f in all_files:
+                m = pattern.match(f)
+                if m:
+                    num_str = m.group(1)
+                    # "all volumes named yyy (if padding 0, remove it)"
+                    # e.g. 001 -> 1
+                    num_val = int(num_str)
+                    grid_name = str(num_val) 
+                    found_sequences.append((os.path.join(base_dir, f), grid_name, num_val))
+            
+            # Sort by number
+            found_sequences.sort(key=lambda x: x[2])
+            
+            if found_sequences:
+                print(f"Found {len(found_sequences)} sequence files.")
+                to_process = [(x[0], x[1]) for x in found_sequences]
+
+            else:
+                print("No sequence files found matching pattern.")
+                to_process = [(filepath, None)]
+        else:
+            print("No digits found in filename for sequence import.")
+            to_process = [(filepath, None)]
+    else:
+        to_process = [(filepath, None)]
+        
+    all_grids = []
+    
+    for path, custom_name in to_process:
+        try:
+            grids = read_vdb_grids(path, scale, naming_mode, custom_name)
+            all_grids.extend(grids)
+        except Exception as e:
+            print(f"Error reading {path}: {e}")
+            
+    if not all_grids:
+        raise RuntimeError("No grids loaded.")
+        
+    print(f"Writing {len(all_grids)} grids to {output_vdb_name}")
+    openvdb.write(output_vdb_name, grids=all_grids)
+    
+    if os.path.exists(output_vdb_name):
+        bpy.ops.object.volume_import(filepath=output_vdb_name, align='WORLD', location=(0,0,0))
         
     print(f"Finished in {time.time() - start_time:.2f}s")
+
 
 
 def menu_func(self, context):
