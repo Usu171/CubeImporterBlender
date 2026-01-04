@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
-id = "cube_blender"
+id = "cube_importer"
 version = "0.1.0"
-name = "Cube Blender"
+name = "Cube Importer"
 tagline = "Import Gaussian Cube files as OpenVDB Volumes"
 maintainer = "Usu171"
 type = "add-on"
@@ -12,7 +12,7 @@ copyright = ["2026 Usu171"]
 
 
 [permissions]
-files = "Import Gaussian Cube files from disk"
+files = "Import Gaussian Cube files from disk and save as OpenVDB Volumes"
 
 [build]
 paths_exclude_pattern = [
