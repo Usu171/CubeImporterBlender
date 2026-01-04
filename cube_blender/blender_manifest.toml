@@ -6,8 +6,9 @@ tagline = "Import Gaussian Cube files as OpenVDB Volumes"
 maintainer = "Usu171"
 type = "add-on"
 blender_version_min = "4.5.0"
-license = ["SPDX:GPL-3.0-or-later"]
 tags = ["Import-Export"]
+license = ["SPDX:GPL-3.0-or-later"]
+copyright = ["2026 Usu171"]
 
 
 [permissions]

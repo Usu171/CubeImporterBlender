@@ -4,6 +4,7 @@ test*
 *.vdb
 *.cub
 *.cube
+*.zip
 test/
 
 __pycache__/
